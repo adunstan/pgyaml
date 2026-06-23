@@ -1,0 +1,11 @@
+*.o
+*.so
+*.dylib
+*.bc
+.deps/
+results/
+regression.diffs
+regression.out
+log/
+testtmp/
+tmp_check/

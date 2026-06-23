@@ -1,0 +1,5 @@
+# pgyaml extension
+comment = 'YAML data type for PostgreSQL'
+default_version = '1.0'
+module_pathname = '$libdir/pgyaml'
+relocatable = true

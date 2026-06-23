@@ -1,0 +1,933 @@
+-- Basic extension setup
+CREATE EXTENSION pgyaml;
+-- Test basic I/O
+SELECT 'name: test'::yaml;
+    yaml    
+------------
+ name: test
+(1 row)
+
+SELECT 'value: 123'::yaml;
+    yaml    
+------------
+ value: 123
+(1 row)
+
+SELECT 'flag: true'::yaml;
+    yaml    
+------------
+ flag: true
+(1 row)
+
+-- Test multi-line YAML
+SELECT 'name: test
+value: 123
+flag: true'::yaml;
+    yaml    
+------------
+ name: test+
+ value: 123+
+ flag: true
+(1 row)
+
+-- Test nested structure
+SELECT 'person:
+  name: John
+  age: 30'::yaml;
+     yaml     
+--------------
+ person:     +
+   name: John+
+   age: 30
+(1 row)
+
+-- Test sequence
+SELECT 'items:
+  - one
+  - two
+  - three'::yaml;
+   yaml    
+-----------
+ items:   +
+   - one  +
+   - two  +
+   - three
+(1 row)
+
+-- Test invalid YAML (should error)
+\set ON_ERROR_STOP off
+SELECT 'invalid: yaml: content:'::yaml;
+ERROR:  invalid YAML input
+LINE 1: SELECT 'invalid: yaml: content:'::yaml;
+               ^
+\set ON_ERROR_STOP on
+-- Test yaml_is_valid
+SELECT yaml_is_valid('name: test');
+ yaml_is_valid 
+---------------
+ t
+(1 row)
+
+SELECT yaml_is_valid('valid: true');
+ yaml_is_valid 
+---------------
+ t
+(1 row)
+
+SELECT yaml_is_valid('  bad yaml::');
+ yaml_is_valid 
+---------------
+ t
+(1 row)
+
+-- Test yaml_get with mapping
+SELECT yaml_get('name: John
+age: 30'::yaml, 'name');
+ yaml_get 
+----------
+ John
+(1 row)
+
+SELECT yaml_get('name: John
+age: 30'::yaml, 'age');
+ yaml_get 
+----------
+ 30
+(1 row)
+
+-- Test yaml_get with nested mapping
+SELECT yaml_get('person:
+  name: Jane
+  city: NYC'::yaml, 'person.name');
+ yaml_get 
+----------
+ Jane
+(1 row)
+
+SELECT yaml_get('person:
+  name: Jane
+  city: NYC'::yaml, 'person.city');
+ yaml_get 
+----------
+ NYC
+(1 row)
+
+-- Test yaml_get with sequence
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items.0');
+ yaml_get 
+----------
+ first
+(1 row)
+
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items.1');
+ yaml_get 
+----------
+ second
+(1 row)
+
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items.2');
+ yaml_get 
+----------
+ third
+(1 row)
+
+-- Test yaml_get with non-existent path
+SELECT yaml_get('name: test'::yaml, 'missing');
+ yaml_get 
+----------
+ 
+(1 row)
+
+SELECT yaml_get('name: test'::yaml, 'name.nested');
+ yaml_get 
+----------
+ 
+(1 row)
+
+-- Test yaml_get_int
+SELECT yaml_get_int('count: 42'::yaml, 'count');
+ yaml_get_int 
+--------------
+           42
+(1 row)
+
+SELECT yaml_get_int('values:
+  - 10
+  - 20
+  - 30'::yaml, 'values.1');
+ yaml_get_int 
+--------------
+           20
+(1 row)
+
+-- yaml_get_int: string scalars that parse as integers are accepted;
+-- junk strings and non-numeric types raise.
+SELECT yaml_get_int('n: "42"'::yaml, 'n');
+ yaml_get_int 
+--------------
+           42
+(1 row)
+
+SELECT yaml_get_int('n: "-7"'::yaml, 'n');
+ yaml_get_int 
+--------------
+           -7
+(1 row)
+
+\set ON_ERROR_STOP off
+SELECT yaml_get_int('n: "abc"'::yaml, 'n');
+ERROR:  invalid input syntax for type integer: "abc"
+SELECT yaml_get_int('n: "3.14"'::yaml, 'n');
+ERROR:  invalid input syntax for type integer: "3.14"
+SELECT yaml_get_int('n: true'::yaml, 'n');
+ERROR:  yaml value at path is not coercible to integer
+SELECT yaml_get_int('n: null'::yaml, 'n');
+ERROR:  yaml value at path is not coercible to integer
+SELECT yaml_get_int('n: {a: 1}'::yaml, 'n');
+ERROR:  yaml value at path is not coercible to integer
+\set ON_ERROR_STOP on
+-- Test yaml_get_float
+SELECT yaml_get_float('price: 19.99'::yaml, 'price');
+ yaml_get_float 
+----------------
+          19.99
+(1 row)
+
+SELECT yaml_get_float('pi: 3.14159'::yaml, 'pi');
+ yaml_get_float 
+----------------
+        3.14159
+(1 row)
+
+-- yaml_get_float: string scalars that parse as float are accepted;
+-- junk strings and non-numeric types raise.
+SELECT yaml_get_float('x: "3.14"'::yaml, 'x');
+ yaml_get_float 
+----------------
+           3.14
+(1 row)
+
+SELECT yaml_get_float('x: "-1e2"'::yaml, 'x');
+ yaml_get_float 
+----------------
+           -100
+(1 row)
+
+\set ON_ERROR_STOP off
+SELECT yaml_get_float('x: "abc"'::yaml, 'x');
+ERROR:  invalid input syntax for type float8: "abc"
+SELECT yaml_get_float('x: true'::yaml, 'x');
+ERROR:  yaml value at path is not coercible to float8
+SELECT yaml_get_float('x: null'::yaml, 'x');
+ERROR:  yaml value at path is not coercible to float8
+SELECT yaml_get_float('x: [1, 2]'::yaml, 'x');
+ERROR:  yaml value at path is not coercible to float8
+\set ON_ERROR_STOP on
+-- Test yaml_get_bool
+SELECT yaml_get_bool('enabled: true'::yaml, 'enabled');
+ yaml_get_bool 
+---------------
+ t
+(1 row)
+
+SELECT yaml_get_bool('enabled: false'::yaml, 'enabled');
+ yaml_get_bool 
+---------------
+ f
+(1 row)
+
+SELECT yaml_get_bool('enabled: yes'::yaml, 'enabled');
+ yaml_get_bool 
+---------------
+ t
+(1 row)
+
+SELECT yaml_get_bool('enabled: no'::yaml, 'enabled');
+ yaml_get_bool 
+---------------
+ f
+(1 row)
+
+SELECT yaml_get_bool('enabled: on'::yaml, 'enabled');
+ yaml_get_bool 
+---------------
+ t
+(1 row)
+
+SELECT yaml_get_bool('enabled: off'::yaml, 'enabled');
+ yaml_get_bool 
+---------------
+ f
+(1 row)
+
+-- Test yaml_typeof
+SELECT yaml_typeof('name: test'::yaml, '');
+ yaml_typeof 
+-------------
+ mapping
+(1 row)
+
+SELECT yaml_typeof('name: test'::yaml, 'name');
+ yaml_typeof 
+-------------
+ scalar
+(1 row)
+
+SELECT yaml_typeof('items:
+  - one
+  - two'::yaml, 'items');
+ yaml_typeof 
+-------------
+ sequence
+(1 row)
+
+SELECT yaml_typeof('items:
+  - one
+  - two'::yaml, 'items.0');
+ yaml_typeof 
+-------------
+ scalar
+(1 row)
+
+-- yaml_typeof: root-scalar documents uniformly return 'scalar', including null
+SELECT yaml_typeof('null'::yaml, '');
+ yaml_typeof 
+-------------
+ scalar
+(1 row)
+
+SELECT yaml_typeof('42'::yaml, '');
+ yaml_typeof 
+-------------
+ scalar
+(1 row)
+
+SELECT yaml_typeof('true'::yaml, '');
+ yaml_typeof 
+-------------
+ scalar
+(1 row)
+
+SELECT yaml_typeof('just a string'::yaml, '');
+ yaml_typeof 
+-------------
+ scalar
+(1 row)
+
+-- yaml_typeof: a null leaf also returns 'scalar' (consistent with root)
+SELECT yaml_typeof('a: null'::yaml, 'a');
+ yaml_typeof 
+-------------
+ scalar
+(1 row)
+
+-- Test yaml_to_json
+SELECT yaml_to_json('name: John'::yaml);
+   yaml_to_json   
+------------------
+ {"name": "John"}
+(1 row)
+
+SELECT yaml_to_json('count: 42'::yaml);
+ yaml_to_json  
+---------------
+ {"count": 42}
+(1 row)
+
+SELECT yaml_to_json('flag: true'::yaml);
+  yaml_to_json  
+----------------
+ {"flag": true}
+(1 row)
+
+SELECT yaml_to_json('empty: null'::yaml);
+  yaml_to_json   
+-----------------
+ {"empty": null}
+(1 row)
+
+SELECT yaml_to_json('items:
+  - one
+  - two'::yaml);
+       yaml_to_json        
+---------------------------
+ {"items": ["one", "two"]}
+(1 row)
+
+SELECT yaml_to_json('person:
+  name: Jane
+  age: 25'::yaml);
+              yaml_to_json               
+-----------------------------------------
+ {"person": {"age": 25, "name": "Jane"}}
+(1 row)
+
+-- Nested containers in YAML->JSON (regression: used to silently fail)
+SELECT yaml_to_json('matrix:
+  - - 1
+    - 2
+  - - 3
+    - 4'::yaml);
+         yaml_to_json         
+------------------------------
+ {"matrix": [[1, 2], [3, 4]]}
+(1 row)
+
+SELECT yaml_to_json('- a: 1
+  b: 2
+- c: 3
+  d: 4'::yaml);
+             yaml_to_json             
+--------------------------------------
+ [{"a": 1, "b": 2}, {"c": 3, "d": 4}]
+(1 row)
+
+SELECT yaml_to_json('outer:
+  inner:
+    - tag: x
+      values: [1, 2, 3]
+    - tag: y
+      values: [4, 5]'::yaml);
+                                       yaml_to_json                                        
+-------------------------------------------------------------------------------------------
+ {"outer": {"inner": [{"tag": "x", "values": [1, 2, 3]}, {"tag": "y", "values": [4, 5]}]}}
+(1 row)
+
+-- Test json_to_yaml
+SELECT json_to_yaml('{"name": "John"}'::json);
+ json_to_yaml 
+--------------
+ name: John
+(1 row)
+
+SELECT json_to_yaml('{"count": 42}'::json);
+ json_to_yaml 
+--------------
+ count: 42
+(1 row)
+
+SELECT json_to_yaml('{"items": ["a", "b", "c"]}'::json);
+ json_to_yaml 
+--------------
+ items:      +
+ - a         +
+ - b         +
+ - c
+(1 row)
+
+-- JSON->YAML decodes \uXXXX escapes to UTF-8 and round-trips
+SELECT yaml_to_json(json_to_yaml('{"greeting": "caf\u00e9"}'::json));
+     yaml_to_json     
+----------------------
+ {"greeting": "café"}
+(1 row)
+
+-- Supplementary plane via surrogate pair
+SELECT yaml_to_json(json_to_yaml('{"emoji": "\uD83D\uDE00"}'::json));
+  yaml_to_json   
+-----------------
+ {"emoji": "😀"}
+(1 row)
+
+-- Malformed escape is rejected
+\set ON_ERROR_STOP off
+SELECT json_to_yaml('{"x": "\uZZZZ"}'::json);
+ERROR:  invalid input syntax for type json
+LINE 1: SELECT json_to_yaml('{"x": "\uZZZZ"}'::json);
+                            ^
+DETAIL:  "\u" must be followed by four hexadecimal digits.
+CONTEXT:  JSON data, line 1: {"x": "\uZ...
+SELECT json_to_yaml('{"x": "\uD83D"}'::json);
+ERROR:  invalid input syntax for type json
+DETAIL:  Unicode low surrogate must follow a high surrogate.
+CONTEXT:  JSON data, line 1: {"x": "\uD83D"...
+SQL function "json_to_yaml" statement 1
+\set ON_ERROR_STOP on
+-- Test comparison operators
+SELECT 'a: 1'::yaml = 'a: 1'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1'::yaml = 'a: 2'::yaml;
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT 'a: 1'::yaml <> 'a: 2'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1'::yaml < 'b: 1'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'b: 1'::yaml > 'a: 1'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Canonicalization: reordered keys compare equal
+SELECT 'a: 1
+b: 2'::yaml = 'b: 2
+a: 1'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Canonicalization: extra whitespace is normalized
+SELECT 'a:   1'::yaml = 'a: 1'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Canonicalization: flow and block styles compare equal
+SELECT '{a: 1, b: 2}'::yaml = 'a: 1
+b: 2'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Canonicalization preserves type: quoted "42" stays a string, bare 42 stays a number
+SELECT yaml_to_json('x: "42"'::yaml);
+ yaml_to_json 
+--------------
+ {"x": "42"}
+(1 row)
+
+SELECT yaml_to_json('x: 42'::yaml);
+ yaml_to_json 
+--------------
+ {"x": 42}
+(1 row)
+
+SELECT 'x: "42"'::yaml = 'x: 42'::yaml;
+ ?column? 
+----------
+ f
+(1 row)
+
+-- Canonicalization rejects multi-document input
+\set ON_ERROR_STOP off
+SELECT E'a: 1\n---\nb: 2'::yaml;
+ERROR:  invalid YAML input
+LINE 1: SELECT E'a: 1\n---\nb: 2'::yaml;
+               ^
+\set ON_ERROR_STOP on
+-- Test indexing
+CREATE TABLE yaml_test (id serial, data yaml);
+INSERT INTO yaml_test (data) VALUES ('name: Alice'::yaml);
+INSERT INTO yaml_test (data) VALUES ('name: Bob'::yaml);
+INSERT INTO yaml_test (data) VALUES ('name: Charlie'::yaml);
+CREATE INDEX ON yaml_test USING btree (data);
+CREATE INDEX ON yaml_test USING hash (data);
+SELECT * FROM yaml_test WHERE data = 'name: Bob'::yaml;
+ id |   data    
+----+-----------
+  2 | name: Bob
+(1 row)
+
+SELECT * FROM yaml_test ORDER BY data;
+ id |     data      
+----+---------------
+  1 | name: Alice
+  2 | name: Bob
+  3 | name: Charlie
+(3 rows)
+
+-- Containment, existence, and jsonpath operators
+SELECT 'a: 1
+b: 2'::yaml @> 'a: 1'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml @> 'c: 3'::yaml;
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT 'a: 1'::yaml <@ 'a: 1
+b: 2'::yaml;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml ? 'a';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml ? 'c';
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml ?| ARRAY['a','c'];
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml ?| ARRAY['c','d'];
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml ?& ARRAY['a','b'];
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml ?& ARRAY['a','c'];
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml @? '$.a';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml @? '$.c';
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml @@ '$.a > 0';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT 'a: 1
+b: 2'::yaml @@ '$.a > 100';
+ ?column? 
+----------
+ f
+(1 row)
+
+-- GIN indexing: both opclasses plan and return correctly
+CREATE TABLE yaml_gin_test (id serial, data yaml);
+INSERT INTO yaml_gin_test (data)
+SELECT format('k: %s
+v: %s', g, g * 2)::yaml FROM generate_series(1, 50) g;
+INSERT INTO yaml_gin_test (data) VALUES ('k: target
+v: found'::yaml);
+CREATE INDEX yaml_gin_default ON yaml_gin_test USING gin (data);
+CREATE INDEX yaml_gin_path ON yaml_gin_test USING gin (data yaml_path_ops);
+-- Jsonpath query functions
+SELECT yaml_path_query('nums: [1, 2, 3, 4]'::yaml, '$.nums[*] ? (@ > 2)');
+ yaml_path_query 
+-----------------
+ 3
+ 4
+(2 rows)
+
+SELECT yaml_path_query_array('nums: [1, 2, 3, 4]'::yaml, '$.nums[*] ? (@ > 2)');
+ yaml_path_query_array 
+-----------------------
+ [3, 4]
+(1 row)
+
+SELECT yaml_path_query_first('nums: [10, 20]'::yaml, '$.nums[*]');
+ yaml_path_query_first 
+-----------------------
+ 10
+(1 row)
+
+SELECT yaml_path_query('n: [1, 2, 3]'::yaml,
+                       '$.n[*] ? (@ > $threshold)',
+                       vars => '{"threshold": 1}'::jsonb);
+ yaml_path_query 
+-----------------
+ 2
+ 3
+(2 rows)
+
+-- silent => true swallows evaluation errors from strict mode
+SELECT yaml_path_query_first('{}'::yaml, 'strict $.missing', silent => true);
+ yaml_path_query_first 
+-----------------------
+ 
+(1 row)
+
+SET enable_seqscan = off;
+SELECT id FROM yaml_gin_test WHERE data @> 'k: target'::yaml;
+ id 
+----
+ 51
+(1 row)
+
+SELECT count(*) FROM yaml_gin_test WHERE data ? 'k';
+ count 
+-------
+    51
+(1 row)
+
+SELECT count(*) FROM yaml_gin_test WHERE data ?| ARRAY['k','missing'];
+ count 
+-------
+    51
+(1 row)
+
+SELECT count(*) FROM yaml_gin_test WHERE data ?& ARRAY['k','v'];
+ count 
+-------
+    51
+(1 row)
+
+SELECT id FROM yaml_gin_test WHERE data @? '$.k ? (@ == "target")';
+ id 
+----
+ 51
+(1 row)
+
+SELECT id FROM yaml_gin_test WHERE data @@ '$.k == "target"';
+ id 
+----
+ 51
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE yaml_gin_test;
+-- Test cast to text
+SELECT 'name: test'::yaml::text;
+    text    
+------------
+ name: test
+(1 row)
+
+-- Test cast from text
+SELECT 'value: 123'::text::yaml;
+    yaml    
+------------
+ value: 123
+(1 row)
+
+-- yaml -> text is implicit (text functions accept yaml directly)
+SELECT length('name: test'::yaml);
+ length 
+--------
+     10
+(1 row)
+
+-- yaml -> json is assignment-only: implicit use in an expression fails
+\set ON_ERROR_STOP off
+SELECT json_array_length('items:
+  - a
+  - b'::yaml);
+ERROR:  function json_array_length(yaml) does not exist
+LINE 1: SELECT json_array_length('items:
+               ^
+DETAIL:  No function of that name accepts the given argument types.
+HINT:  You might need to add explicit type casts.
+\set ON_ERROR_STOP on
+-- But the explicit cast still works
+SELECT json_array_length(('items:
+  - a
+  - b'::yaml)::json -> 'items');
+ json_array_length 
+-------------------
+                 2
+(1 row)
+
+-- yaml_to_jsonb exposes the decomposed form directly
+SELECT yaml_to_jsonb('person:
+  name: Jane
+  age: 25'::yaml);
+              yaml_to_jsonb              
+-----------------------------------------
+ {"person": {"age": 25, "name": "Jane"}}
+(1 row)
+
+-- Round-trip fidelity: yaml_out returns the original bytes (including
+-- whitespace and key order), unlike the old canonicalize-on-input design.
+SELECT 'z: 1
+a: 2
+m: 3'::yaml;
+ yaml 
+------
+ z: 1+
+ a: 2+
+ m: 3
+(1 row)
+
+-- Scalar-rooted documents are allowed
+SELECT 'just a string'::yaml;
+     yaml      
+---------------
+ just a string
+(1 row)
+
+SELECT '42'::yaml;
+ yaml 
+------
+ 42
+(1 row)
+
+SELECT 'null'::yaml;
+ yaml 
+------
+ null
+(1 row)
+
+-- Scalar-rooted values can still be converted to jsonb
+SELECT yaml_to_jsonb('42'::yaml);
+ yaml_to_jsonb 
+---------------
+ 42
+(1 row)
+
+SELECT yaml_to_jsonb('null'::yaml);
+ yaml_to_jsonb 
+---------------
+ null
+(1 row)
+
+SELECT yaml_to_jsonb('just a string'::yaml);
+  yaml_to_jsonb  
+-----------------
+ "just a string"
+(1 row)
+
+-- Anchors and aliases: libyaml resolves them at parse time and the
+-- referenced content is duplicated into each use site in the jsonb.
+SELECT yaml_to_jsonb('i: &x hello
+j: *x'::yaml);
+        yaml_to_jsonb         
+------------------------------
+ {"i": "hello", "j": "hello"}
+(1 row)
+
+SELECT yaml_get('defaults: &d
+  color: blue
+  size: large
+item1: *d
+item2: *d'::yaml, 'item1.color');
+ yaml_get 
+----------
+ blue
+(1 row)
+
+SELECT yaml_get('defaults: &d
+  color: blue
+  size: large
+item1: *d
+item2: *d'::yaml, 'item2.size');
+ yaml_get 
+----------
+ large
+(1 row)
+
+-- Aliased scalars work too
+SELECT yaml_get_int('x: &n 42
+y: *n'::yaml, 'y');
+ yaml_get_int 
+--------------
+           42
+(1 row)
+
+-- Cyclic aliases trip the 1024-level depth guard and are rejected
+\set ON_ERROR_STOP off
+SELECT '&loop [ *loop ]'::yaml;
+ERROR:  invalid YAML input
+LINE 1: SELECT '&loop [ *loop ]'::yaml;
+               ^
+\set ON_ERROR_STOP on
+-- jsonb_to_yaml round-trip preserves type semantics
+SELECT jsonb_to_yaml('{"a": 1, "b": "hello", "c": true, "d": null}'::jsonb);
+ jsonb_to_yaml 
+---------------
+ a: 1         +
+ b: hello     +
+ c: true      +
+ d: null
+(1 row)
+
+-- yaml_get on a non-scalar path now returns the sub-document as JSON text
+SELECT yaml_get('person:
+  name: Jane
+  address:
+    city: NYC
+    zip: "10001"'::yaml, 'person');
+                           yaml_get                           
+--------------------------------------------------------------
+ {"name": "Jane", "address": {"zip": "10001", "city": "NYC"}}
+(1 row)
+
+SELECT yaml_get('person:
+  address:
+    city: NYC'::yaml, 'person.address');
+    yaml_get     
+-----------------
+ {"city": "NYC"}
+(1 row)
+
+-- yaml_is_valid matches yaml_in: rejects malformed and multi-doc input
+SELECT yaml_is_valid('name: test');
+ yaml_is_valid 
+---------------
+ t
+(1 row)
+
+SELECT yaml_is_valid('  bad yaml: : :');
+ yaml_is_valid 
+---------------
+ f
+(1 row)
+
+SELECT yaml_is_valid(E'a: 1\n---\nb: 2');
+ yaml_is_valid 
+---------------
+ f
+(1 row)
+
+SELECT yaml_is_valid('');
+ yaml_is_valid 
+---------------
+ f
+(1 row)
+
+-- Cleanup
+DROP TABLE yaml_test;
+DROP EXTENSION pgyaml;
