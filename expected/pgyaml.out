@@ -905,25 +905,32 @@ SELECT yaml_get('person:
 
 -- yaml_is_valid matches yaml_in: rejects malformed and multi-doc input
 SELECT yaml_is_valid('name: test');
- yaml_is_valid 
+ yaml_is_valid
 ---------------
  t
 (1 row)
 
 SELECT yaml_is_valid('  bad yaml: : :');
- yaml_is_valid 
+ yaml_is_valid
 ---------------
  f
 (1 row)
 
 SELECT yaml_is_valid(E'a: 1\n---\nb: 2');
- yaml_is_valid 
+ yaml_is_valid
+---------------
+ f
+(1 row)
+
+-- malformed second document must also be rejected (not silently accepted)
+SELECT yaml_is_valid(E'a: 1\n---\n: : bad');
+ yaml_is_valid
 ---------------
  f
 (1 row)
 
 SELECT yaml_is_valid('');
- yaml_is_valid 
+ yaml_is_valid
 ---------------
  f
 (1 row)

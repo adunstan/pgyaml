@@ -125,7 +125,7 @@ functions are not.
 
 | Function | Returns | Behavior |
 |---|---|---|
-| `yaml_is_valid(text)` | `boolean` | True iff `yaml_in` would accept the input (single-document, alias-free, mapping-scalar-keyed YAML only; multi-document streams return false). |
+| `yaml_is_valid(text)` | `boolean` | True iff `yaml_in` would accept the input (single-document, mapping-scalar-keyed YAML only; aliases are resolved, not rejected; multi-document streams return false). |
 
 ## Operators and indexing
 
@@ -246,7 +246,7 @@ Comments and original formatting do round-trip through `yaml_out` /
 you need multi-document streams, or anchor/alias sharing or comments
 preserved across a pass through jsonb, you want a `text` column, not
 this type. Note that `yaml_is_valid()` rejects multi-document streams,
-so it is not suitable as a check constraint for that use case.
+so it is not suitable as a check constraint for the multi-document use case.
 
 ## Examples
 

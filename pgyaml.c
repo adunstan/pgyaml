@@ -293,7 +293,6 @@ yaml_text_to_jsonb(const char *input, int input_len)
 	JsonbValue	jbv;
 	Jsonb	   *jb = NULL;
 	bool		ok = true;
-	bool		multi_doc = false;
 
 	if (!yaml_parser_initialize(&parser))
 		return NULL;
@@ -329,17 +328,26 @@ yaml_text_to_jsonb(const char *input, int input_len)
 	yaml_document_delete(&document);
 
 	/* Reject additional documents in the stream. */
-	if (jb != NULL && yaml_parser_load(&parser, &extra))
+	if (jb != NULL)
 	{
+		if (!yaml_parser_load(&parser, &extra))
+		{
+			/* Malformed content after first document — treat as multi-doc. */
+			yaml_parser_delete(&parser);
+			pfree(jb);
+			return NULL;
+		}
 		if (yaml_document_get_root_node(&extra) != NULL)
-			multi_doc = true;
+		{
+			yaml_document_delete(&extra);
+			yaml_parser_delete(&parser);
+			pfree(jb);
+			return NULL;
+		}
 		yaml_document_delete(&extra);
 	}
 
 	yaml_parser_delete(&parser);
-
-	if (multi_doc)
-		return NULL;
 	return jb;
 }
 
@@ -749,7 +757,7 @@ jbvalue_to_text(JsonbValue *v)
 {
 	char	   *str;
 	StringInfoData buf;
-	Jsonb	   *sub;
+	text	   *result;
 
 	switch (v->type)
 	{
@@ -766,9 +774,10 @@ jbvalue_to_text(JsonbValue *v)
 			return cstring_to_text(v->val.boolean ? "true" : "false");
 		case jbvBinary:
 			initStringInfo(&buf);
-			sub = JsonbValueToJsonb(v);
-			JsonbToCString(&buf, &sub->root, v->val.binary.len);
-			return cstring_to_text_with_len(buf.data, buf.len);
+			JsonbToCString(&buf, v->val.binary.data, v->val.binary.len);
+			result = cstring_to_text_with_len(buf.data, buf.len);
+			pfree(buf.data);
+			return result;
 		default:
 			return NULL;
 	}
@@ -1055,18 +1064,25 @@ yaml_to_text(PG_FUNCTION_ARGS)
 /*---------------------------------------------------------------------
  * Jsonb-delegating containment, existence, and jsonpath operators.
  *
- * Each wrapper replaces yaml Datums in fcinfo->args with pointers to
- * the stored jsonb slice and invokes the corresponding core jsonb
- * function.  That keeps semantics identical to jsonb without
- * allocating a fresh jsonb copy.
+ * Each wrapper extracts the embedded jsonb from the yaml Datum, copies
+ * it into its own palloc'd buffer (freeing any detoasted YamlValue
+ * copy), installs the jsonb pointer into fcinfo->args, and invokes the
+ * corresponding core jsonb function.
  *---------------------------------------------------------------------*/
 
 static void
 yaml_arg_to_jsonb(FunctionCallInfo fcinfo, int argno)
 {
-	YamlValue  *y = (YamlValue *) PG_DETOAST_DATUM(fcinfo->args[argno].value);
+	Datum		orig = fcinfo->args[argno].value;
+	YamlValue  *y = (YamlValue *) PG_DETOAST_DATUM(orig);
+	Jsonb	   *src = YAML_JSONB_PTR(y);
+	Size		sz = VARSIZE(src);
+	Jsonb	   *copy = palloc(sz);
 
-	fcinfo->args[argno].value = JsonbPGetDatum(YAML_JSONB_PTR(y));
+	memcpy(copy, src, sz);
+	if ((Pointer) y != DatumGetPointer(orig))
+		pfree(y);
+	fcinfo->args[argno].value = JsonbPGetDatum(copy);
 }
 
 PG_FUNCTION_INFO_V1(yaml_contains);

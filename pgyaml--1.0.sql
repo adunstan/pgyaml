@@ -216,7 +216,7 @@ CREATE OPERATOR @@ (
 -- only @>, @?, @@.  Strategy and support-function numbers are kept
 -- identical to jsonb's so the underlying core routines (which we
 -- delegate to) behave unchanged.
-CREATE FUNCTION gin_extract_yaml(yaml, internal) RETURNS internal
+CREATE FUNCTION gin_extract_yaml(yaml, internal, internal) RETURNS internal
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT IMMUTABLE;
 CREATE FUNCTION gin_extract_yaml_query(yaml, internal, int2, internal, internal, internal, internal) RETURNS internal
 AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE;
@@ -225,7 +225,7 @@ AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE;
 CREATE FUNCTION gin_triconsistent_yaml(internal, int2, yaml, int4, internal, internal, internal) RETURNS "char"
 AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE;
 
-CREATE FUNCTION gin_extract_yaml_path(yaml, internal) RETURNS internal
+CREATE FUNCTION gin_extract_yaml_path(yaml, internal, internal) RETURNS internal
 AS 'MODULE_PATHNAME' LANGUAGE C STRICT IMMUTABLE;
 CREATE FUNCTION gin_extract_yaml_query_path(yaml, internal, int2, internal, internal, internal, internal) RETURNS internal
 AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE;
@@ -243,7 +243,7 @@ DEFAULT FOR TYPE yaml USING gin AS
     OPERATOR 15 @? (yaml, jsonpath),
     OPERATOR 16 @@ (yaml, jsonpath),
     FUNCTION 1 gin_compare_jsonb(text, text),
-    FUNCTION 2 gin_extract_yaml(yaml, internal),
+    FUNCTION 2 gin_extract_yaml(yaml, internal, internal),
     FUNCTION 3 gin_extract_yaml_query(yaml, internal, int2, internal, internal, internal, internal),
     FUNCTION 4 gin_consistent_yaml(internal, int2, yaml, int4, internal, internal, internal, internal),
     FUNCTION 6 gin_triconsistent_yaml(internal, int2, yaml, int4, internal, internal, internal),
@@ -271,7 +271,7 @@ FOR TYPE yaml USING gin AS
     OPERATOR 15 @? (yaml, jsonpath),
     OPERATOR 16 @@ (yaml, jsonpath),
     FUNCTION 1 btint4cmp(int4, int4),
-    FUNCTION 2 gin_extract_yaml_path(yaml, internal),
+    FUNCTION 2 gin_extract_yaml_path(yaml, internal, internal),
     FUNCTION 3 gin_extract_yaml_query_path(yaml, internal, int2, internal, internal, internal, internal),
     FUNCTION 4 gin_consistent_yaml_path(internal, int2, yaml, int4, internal, internal, internal, internal),
     FUNCTION 6 gin_triconsistent_yaml_path(internal, int2, yaml, int4, internal, internal, internal),

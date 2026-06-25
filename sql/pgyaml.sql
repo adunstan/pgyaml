@@ -349,6 +349,8 @@ SELECT yaml_get('person:
 SELECT yaml_is_valid('name: test');
 SELECT yaml_is_valid('  bad yaml: : :');
 SELECT yaml_is_valid(E'a: 1\n---\nb: 2');
+-- malformed second document must also be rejected (not silently accepted)
+SELECT yaml_is_valid(E'a: 1\n---\n: : bad');
 SELECT yaml_is_valid('');
 
 -- Cleanup
