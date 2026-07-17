@@ -334,6 +334,8 @@ yaml_text_to_jsonb(const char *input, int input_len)
 	Jsonb	   *jb = NULL;
 	bool		ok = true;
 	int64		nodecount = 0;
+	volatile bool document_valid = false;
+	volatile bool extra_valid = false;
 
 	if (!yaml_parser_initialize(&parser))
 		return NULL;
@@ -345,48 +347,70 @@ yaml_text_to_jsonb(const char *input, int input_len)
 		yaml_parser_delete(&parser);
 		return NULL;
 	}
+	document_valid = true;
 
-	root = yaml_document_get_root_node(&document);
-	if (root == NULL)
+	/*
+	 * yaml_document_t/yaml_parser_t hold libyaml's own (non-palloc'd)
+	 * buffers, which an ereport(ERROR) below would leak by longjmp'ing
+	 * past their _delete calls.  Guard the whole region that can raise
+	 * (JsonbValueToJsonb, numeric_in via yaml_scalar_to_jbvalue, and
+	 * pushJsonbValue's size-limit checks inside push_yaml_node) so both
+	 * are always released.
+	 */
+	PG_TRY();
 	{
+		root = yaml_document_get_root_node(&document);
+		if (root != NULL)
+		{
+			if (root->type == YAML_SCALAR_NODE)
+			{
+				if (yaml_scalar_to_jbvalue(root, &jbv))
+					jb = JsonbValueToJsonb(&jbv);
+			}
+			else
+			{
+				push_yaml_node(&document, root, &jin, WJB_ELEM, 0,
+							   &nodecount, &ok);
+				if (ok && jin.result != NULL)
+					jb = JsonbValueToJsonb(jin.result);
+			}
+		}
+
 		yaml_document_delete(&document);
-		yaml_parser_delete(&parser);
-		return NULL;
-	}
+		document_valid = false;
 
-	if (root->type == YAML_SCALAR_NODE)
-	{
-		if (yaml_scalar_to_jbvalue(root, &jbv))
-			jb = JsonbValueToJsonb(&jbv);
-	}
-	else
-	{
-		push_yaml_node(&document, root, &jin, WJB_ELEM, 0, &nodecount, &ok);
-		if (ok && jin.result != NULL)
-			jb = JsonbValueToJsonb(jin.result);
-	}
-
-	yaml_document_delete(&document);
-
-	/* Reject additional documents in the stream. */
-	if (jb != NULL)
-	{
-		if (!yaml_parser_load(&parser, &extra))
+		/* Reject additional documents in the stream. */
+		if (jb != NULL)
 		{
-			/* Malformed content after first document — treat as multi-doc. */
-			yaml_parser_delete(&parser);
-			pfree(jb);
-			return NULL;
+			if (!yaml_parser_load(&parser, &extra))
+			{
+				/* Malformed content after first document — multi-doc. */
+				pfree(jb);
+				jb = NULL;
+			}
+			else
+			{
+				extra_valid = true;
+				if (yaml_document_get_root_node(&extra) != NULL)
+				{
+					pfree(jb);
+					jb = NULL;
+				}
+				yaml_document_delete(&extra);
+				extra_valid = false;
+			}
 		}
-		if (yaml_document_get_root_node(&extra) != NULL)
-		{
+	}
+	PG_CATCH();
+	{
+		if (document_valid)
+			yaml_document_delete(&document);
+		if (extra_valid)
 			yaml_document_delete(&extra);
-			yaml_parser_delete(&parser);
-			pfree(jb);
-			return NULL;
-		}
-		yaml_document_delete(&extra);
+		yaml_parser_delete(&parser);
+		PG_RE_THROW();
 	}
+	PG_END_TRY();
 
 	yaml_parser_delete(&parser);
 	return jb;
@@ -623,68 +647,86 @@ jsonb_to_yaml_value(Jsonb *jb)
 		pfree(out.data);
 		return NULL;
 	}
-	yaml_emitter_set_output(&emitter, yaml_emitter_write_handler, &out);
-	yaml_emitter_set_unicode(&emitter, 1);
 
-	ok = yaml_stream_start_event_initialize(&event, YAML_UTF8_ENCODING) &&
-		yaml_emitter_emit(&emitter, &event) &&
-		yaml_document_start_event_initialize(&event, NULL, NULL, NULL, 1) &&
-		yaml_emitter_emit(&emitter, &event);
-
-	it = JsonbIteratorInit(&jb->root);
-	while (ok && (tok = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
+	/*
+	 * yaml_emitter_t holds libyaml's own (non-palloc'd) buffers, which an
+	 * ereport(ERROR) below would leak by longjmp'ing past
+	 * yaml_emitter_delete.  numeric_out (via emit_jsonb_scalar) and
+	 * enlargeStringInfo's MaxAllocSize ceiling (via the write handler,
+	 * called from every yaml_emitter_emit) can both raise, so guard the
+	 * whole emit loop.
+	 */
+	PG_TRY();
 	{
-		switch (tok)
-		{
-			case WJB_BEGIN_ARRAY:
-				if (v.val.array.rawScalar)
-				{
-					/* A root-level scalar wrapped in a pseudo-array */
-					JsonbValue	scalar;
+		yaml_emitter_set_output(&emitter, yaml_emitter_write_handler, &out);
+		yaml_emitter_set_unicode(&emitter, 1);
 
-					tok = JsonbIteratorNext(&it, &scalar, false);
-					Assert(tok == WJB_ELEM);
-					ok = emit_jsonb_scalar(&emitter, &scalar);
-					tok = JsonbIteratorNext(&it, &v, false);
-					Assert(tok == WJB_END_ARRAY);
-				}
-				else
-				{
-					ok = yaml_sequence_start_event_initialize(&event, NULL,
-															  NULL, 1,
-															  YAML_BLOCK_SEQUENCE_STYLE) &&
-						yaml_emitter_emit(&emitter, &event);
-				}
-				break;
-			case WJB_END_ARRAY:
-				ok = yaml_sequence_end_event_initialize(&event) &&
-					yaml_emitter_emit(&emitter, &event);
-				break;
-			case WJB_BEGIN_OBJECT:
-				ok = yaml_mapping_start_event_initialize(&event, NULL, NULL, 1,
-														 YAML_BLOCK_MAPPING_STYLE) &&
-					yaml_emitter_emit(&emitter, &event);
-				break;
-			case WJB_END_OBJECT:
-				ok = yaml_mapping_end_event_initialize(&event) &&
-					yaml_emitter_emit(&emitter, &event);
-				break;
-			case WJB_KEY:
-			case WJB_VALUE:
-			case WJB_ELEM:
-				ok = emit_jsonb_scalar(&emitter, &v);
-				break;
-			default:
-				ok = false;
-				break;
-		}
-	}
-
-	if (ok)
-		ok = yaml_document_end_event_initialize(&event, 1) &&
+		ok = yaml_stream_start_event_initialize(&event, YAML_UTF8_ENCODING) &&
 			yaml_emitter_emit(&emitter, &event) &&
-			yaml_stream_end_event_initialize(&event) &&
+			yaml_document_start_event_initialize(&event, NULL, NULL, NULL, 1) &&
 			yaml_emitter_emit(&emitter, &event);
+
+		it = JsonbIteratorInit(&jb->root);
+		while (ok && (tok = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
+		{
+			switch (tok)
+			{
+				case WJB_BEGIN_ARRAY:
+					if (v.val.array.rawScalar)
+					{
+						/* A root-level scalar wrapped in a pseudo-array */
+						JsonbValue	scalar;
+
+						tok = JsonbIteratorNext(&it, &scalar, false);
+						Assert(tok == WJB_ELEM);
+						ok = emit_jsonb_scalar(&emitter, &scalar);
+						tok = JsonbIteratorNext(&it, &v, false);
+						Assert(tok == WJB_END_ARRAY);
+					}
+					else
+					{
+						ok = yaml_sequence_start_event_initialize(&event, NULL,
+																  NULL, 1,
+																  YAML_BLOCK_SEQUENCE_STYLE) &&
+							yaml_emitter_emit(&emitter, &event);
+					}
+					break;
+				case WJB_END_ARRAY:
+					ok = yaml_sequence_end_event_initialize(&event) &&
+						yaml_emitter_emit(&emitter, &event);
+					break;
+				case WJB_BEGIN_OBJECT:
+					ok = yaml_mapping_start_event_initialize(&event, NULL, NULL, 1,
+															 YAML_BLOCK_MAPPING_STYLE) &&
+						yaml_emitter_emit(&emitter, &event);
+					break;
+				case WJB_END_OBJECT:
+					ok = yaml_mapping_end_event_initialize(&event) &&
+						yaml_emitter_emit(&emitter, &event);
+					break;
+				case WJB_KEY:
+				case WJB_VALUE:
+				case WJB_ELEM:
+					ok = emit_jsonb_scalar(&emitter, &v);
+					break;
+				default:
+					ok = false;
+					break;
+			}
+		}
+
+		if (ok)
+			ok = yaml_document_end_event_initialize(&event, 1) &&
+				yaml_emitter_emit(&emitter, &event) &&
+				yaml_stream_end_event_initialize(&event) &&
+				yaml_emitter_emit(&emitter, &event);
+	}
+	PG_CATCH();
+	{
+		yaml_emitter_delete(&emitter);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	yaml_emitter_delete(&emitter);
 
