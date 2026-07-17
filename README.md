@@ -76,7 +76,10 @@ are rejected. Non-scalar mapping keys are rejected (jsonb requires
 scalar keys). Anchors and aliases are resolved by libyaml at parse
 time and the referenced content is duplicated into each use site in
 the jsonb, so graph sharing is not preserved. Cyclic aliases are
-rejected by a 1024-level depth guard.
+rejected by a 1024-level depth guard, and any document whose total
+number of materialized values (across all containers, including
+values duplicated via non-cyclic alias re-expansion) exceeds 50000
+is rejected as well.
 
 ## Functions
 
@@ -224,9 +227,18 @@ Deliberate non-goals:
 - **Anchors and aliases** (`&x` / `*x`) are accepted but flattened:
   libyaml resolves each alias to the anchored node, and we deep-copy
   that content into the jsonb at every reference, so shared structure
-  is lost. Cyclic aliases hit a 1024-level depth guard and are
-  rejected (a DoS-avoidance measure since jsonb can't represent
-  cycles).
+  is lost. Because jsonb has no aliasing of its own, a chain of
+  anchors that each reference an earlier one multiple times expands
+  into exponentially many materialized values from a small document
+  on the wire. Two guards bound this, both DoS-avoidance measures:
+  cyclic aliases hit a 1024-level depth guard, and any document —
+  cyclic or not, and independent of aliasing — whose total number of
+  materialized values exceeds 50000 is rejected outright.
+  **This second guard also applies to plain, alias-free documents**:
+  a legitimately large flat document (tens of thousands of array
+  elements or mapping entries with no anchors involved) can hit the
+  same cap. If you need a single document larger than that, split it
+  across multiple rows instead.
 - **Multi-document streams** (`---`) are rejected. Split them in the
   application if you need per-document rows.
 - **Duplicate mapping keys** collapse per jsonb's last-wins rule.
