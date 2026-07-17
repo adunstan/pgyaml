@@ -140,6 +140,68 @@ SELECT yaml_get('items:
  third
 (1 row)
 
+-- An empty path segment is a malformed path, not a data-dependent "not
+-- found": reject it outright rather than silently treating it the same
+-- as the equivalent well-formed path (strtok_r would otherwise collapse
+-- "items..0"/".items"/"items." down to "items.0"/"items"/"items").
+\set ON_ERROR_STOP off
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items..0');
+ERROR:  invalid yaml path "items..0": empty path segment
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, '.items');
+ERROR:  invalid yaml path ".items": empty path segment
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items.');
+ERROR:  invalid yaml path "items.": empty path segment
+\set ON_ERROR_STOP on
+-- An array-index path segment must be plain decimal digits: a leading
+-- '+' or leading whitespace is rejected (returning NULL, the same as
+-- any other malformed index against an array) rather than silently
+-- accepted the way generic strtol() parsing alone would accept it.
+--
+-- The overflow check below (errno/UINT_MAX, guarding against a token
+-- too large for a long or a uint32 index) also returns NULL here, but
+-- coincidentally: any overflowing token clamps to the same sentinel
+-- value regardless of its actual digits, which lands far out of range
+-- for this 3-element array either way. Only a container with billions
+-- of elements would expose the difference between "properly rejected"
+-- and "silently wrapped to an unrelated index" -- not practical to
+-- test here, but the check still guards real callers with huge
+-- containers.
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items.99999999999999999999');
+ yaml_get 
+----------
+ 
+(1 row)
+
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items.+0');
+ yaml_get 
+----------
+ 
+(1 row)
+
+SELECT yaml_get('items:
+  - first
+  - second
+  - third'::yaml, 'items. 0');
+ yaml_get 
+----------
+ 
+(1 row)
+
 -- Test yaml_get with non-existent path
 SELECT yaml_get('name: test'::yaml, 'missing');
  yaml_get 

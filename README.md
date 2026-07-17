@@ -98,7 +98,14 @@ is rejected as well.
 ### Path extraction
 
 Path syntax is dot-separated. Numeric tokens index sequences; anything
-else looks up a mapping key.
+else looks up a mapping key. An empty segment (a leading, trailing, or
+doubled `.`) is a malformed path and raises an error rather than being
+silently collapsed. An index token must be plain decimal digits — no
+leading `+`, no leading whitespace, and no value too large for a
+32-bit index — anything else is treated as a non-matching path
+(returning NULL/false, the same as any other path that doesn't exist),
+not an error, since whether a token was ever meant to be numeric
+depends on the data being queried, not the path string alone.
 
 | Function | Returns | Behavior |
 |---|---|---|

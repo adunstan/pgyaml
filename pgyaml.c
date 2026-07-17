@@ -33,6 +33,8 @@
 #include "utils/varlena.h"
 
 #include <yaml.h>
+#include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <strings.h>
 
@@ -770,7 +772,11 @@ jsonb_to_yaml(PG_FUNCTION_ARGS)
 /*
  * Walk a dot-separated path into a jsonb.  Numeric tokens index arrays;
  * anything else looks up an object key.  Returns NULL if the path is
- * not present or crosses a scalar.
+ * not present or crosses a scalar.  Raises an error if the path string
+ * itself is malformed (an empty segment): that is a caller/query bug
+ * detectable from the path alone, independent of the data being
+ * queried, so it gets a hard error rather than being silently folded
+ * into "not found" the way a data-dependent traversal miss is.
  */
 static JsonbValue *
 yaml_jsonb_path(Jsonb *jb, const char *path)
@@ -787,6 +793,13 @@ yaml_jsonb_path(Jsonb *jb, const char *path)
 	if (path == NULL || *path == '\0')
 		return NULL;
 
+	if (path[0] == '.' || path[strlen(path) - 1] == '.' ||
+		strstr(path, "..") != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid yaml path \"%s\": empty path segment",
+						path)));
+
 	container = &jb->root;
 	path_copy = pstrdup(path);
 	token = strtok_r(path_copy, ".", &saveptr);
@@ -795,8 +808,28 @@ yaml_jsonb_path(Jsonb *jb, const char *path)
 	{
 		if (JsonContainerIsArray(container) && !JsonContainerIsScalar(container))
 		{
+			const char *p;
+			bool		all_digits = true;
+
+			for (p = token; *p != '\0'; p++)
+			{
+				if (*p < '0' || *p > '9')
+				{
+					all_digits = false;
+					break;
+				}
+			}
+
+			if (!all_digits)
+			{
+				pfree(path_copy);
+				return NULL;
+			}
+
+			errno = 0;
 			index = strtol(token, &endptr, 10);
-			if (*endptr != '\0' || index < 0)
+			if (*endptr != '\0' || errno == ERANGE ||
+				index < 0 || index > UINT_MAX)
 			{
 				pfree(path_copy);
 				return NULL;
