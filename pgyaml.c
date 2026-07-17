@@ -60,12 +60,29 @@ typedef struct YamlValue
 /* Guard against pathological nesting (including alias cycles). */
 #define YAML_MAX_DEPTH			1024
 
+/*
+ * Guard against pathological anchor/alias re-expansion.  libyaml resolves
+ * aliases to shared node indices at parse time (there is no alias node
+ * type), so push_yaml_node sees a DAG rather than a tree: a node reachable
+ * via N distinct parent paths is independently re-walked and
+ * re-materialized N times.  jsonb has no aliasing of its own, so every
+ * such reference must be physically duplicated in the output regardless
+ * of how push_yaml_node is written; a chain of anchors each referencing
+ * the previous one twice therefore produces an exponential number of
+ * materialized values from a linear-sized input.  YAML_MAX_DEPTH bounds
+ * chain length, not this; cap total materialized values across one
+ * document instead, so pathological input fails cleanly well before it
+ * can exhaust memory.
+ */
+#define YAML_MAX_MATERIALIZED_NODES	50000
+
 /* Forward declarations (Postgres style). */
 static bool looks_like_number(const char *str);
 static bool yaml_scalar_to_jbvalue(yaml_node_t *node, JsonbValue *jbv);
+static bool yaml_charge_node_budget(int64 *nodecount, bool *ok);
 static void push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 						   JsonbInState *jin, JsonbIteratorToken scalar_tok,
-						   int depth, bool *ok);
+						   int depth, int64 *nodecount, bool *ok);
 static Jsonb *yaml_text_to_jsonb(const char *input, int input_len);
 static YamlValue *build_yaml_value(const char *orig, int orig_len, Jsonb *jb);
 static YamlValue *jsonb_to_yaml_value(Jsonb *jb);
@@ -194,6 +211,23 @@ yaml_scalar_to_jbvalue(yaml_node_t *node, JsonbValue *jbv)
 }
 
 /*
+ * Charge one unit against the total-materialized-node budget (see
+ * YAML_MAX_MATERIALIZED_NODES above).  Returns false, and sets *ok to
+ * false, once the budget is exhausted; the caller must bail out
+ * immediately in that case.
+ */
+static bool
+yaml_charge_node_budget(int64 *nodecount, bool *ok)
+{
+	if (++(*nodecount) > YAML_MAX_MATERIALIZED_NODES)
+	{
+		*ok = false;
+		return false;
+	}
+	return true;
+}
+
+/*
  * Walk a YAML node subtree, pushing its contents into the JsonbInState.
  * Scalar values are pushed with the caller-supplied token (WJB_ELEM,
  * WJB_VALUE, or WJB_KEY).  *ok is set to false on any structural error.
@@ -201,7 +235,7 @@ yaml_scalar_to_jbvalue(yaml_node_t *node, JsonbValue *jbv)
 static void
 push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 			   JsonbInState *jin, JsonbIteratorToken scalar_tok,
-			   int depth, bool *ok)
+			   int depth, int64 *nodecount, bool *ok)
 {
 	JsonbValue	jbv;
 	yaml_node_item_t *item;
@@ -217,6 +251,8 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 		*ok = false;
 		return;
 	}
+	if (!yaml_charge_node_budget(nodecount, ok))
+		return;
 
 	switch (node->type)
 	{
@@ -241,7 +277,8 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 					*ok = false;
 					return;
 				}
-				push_yaml_node(doc, sub, jin, WJB_ELEM, depth + 1, ok);
+				push_yaml_node(doc, sub, jin, WJB_ELEM, depth + 1,
+							   nodecount, ok);
 			}
 			if (*ok)
 				pushJsonbValue(jin, WJB_END_ARRAY, NULL);
@@ -261,12 +298,15 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 					*ok = false;
 					return;
 				}
+				if (!yaml_charge_node_budget(nodecount, ok))
+					return;
 				/* jsonb object keys are always strings */
 				jbv.type = jbvString;
 				jbv.val.string.val = (char *) key_node->data.scalar.value;
 				jbv.val.string.len = (int) key_node->data.scalar.length;
 				pushJsonbValue(jin, WJB_KEY, &jbv);
-				push_yaml_node(doc, val_node, jin, WJB_VALUE, depth + 1, ok);
+				push_yaml_node(doc, val_node, jin, WJB_VALUE, depth + 1,
+							   nodecount, ok);
 			}
 			if (*ok)
 				pushJsonbValue(jin, WJB_END_OBJECT, NULL);
@@ -293,6 +333,7 @@ yaml_text_to_jsonb(const char *input, int input_len)
 	JsonbValue	jbv;
 	Jsonb	   *jb = NULL;
 	bool		ok = true;
+	int64		nodecount = 0;
 
 	if (!yaml_parser_initialize(&parser))
 		return NULL;
@@ -320,7 +361,7 @@ yaml_text_to_jsonb(const char *input, int input_len)
 	}
 	else
 	{
-		push_yaml_node(&document, root, &jin, WJB_ELEM, 0, &ok);
+		push_yaml_node(&document, root, &jin, WJB_ELEM, 0, &nodecount, &ok);
 		if (ok && jin.result != NULL)
 			jb = JsonbValueToJsonb(jin.result);
 	}
