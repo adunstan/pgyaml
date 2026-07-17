@@ -23,6 +23,7 @@
 #include "catalog/pg_type.h"
 #include "libpq/pqformat.h"
 #include "access/stratnum.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/fmgrprotos.h"
@@ -243,6 +244,8 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 	yaml_node_t *sub;
 	yaml_node_t *key_node;
 	yaml_node_t *val_node;
+
+	check_stack_depth();
 
 	if (!*ok)
 		return;
