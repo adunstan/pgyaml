@@ -209,6 +209,36 @@ CREATE INDEX ON yaml_test USING hash (data);
 SELECT * FROM yaml_test WHERE data = 'name: Bob'::yaml;
 SELECT * FROM yaml_test ORDER BY data;
 
+-- Binary wire format (yaml_recv/yaml_send): round-trip via a client-side
+-- \copy in binary format exercises the recv path directly (COPY
+-- TEXT/CSV never calls it).  \copy is a psql-side operation, resolved
+-- relative to the client's own working directory (pg_regress runs
+-- psql from the extension's source tree, mirroring the \copy ...
+-- 'data/hstore.data' convention used by contrib/hstore), so this needs
+-- no superuser server-side file access and no absolute path.
+CREATE TABLE yaml_test_bin (id serial, data yaml);
+INSERT INTO yaml_test_bin (id, data) VALUES
+  (1, 'name: test'::yaml),
+  (2, 'person:
+  name: Jane
+  age: 25'::yaml),
+  (3, 'items:
+  - one
+  - two
+  - three'::yaml),
+  (4, '42'::yaml),
+  (5, 'null'::yaml);
+
+\copy yaml_test_bin TO 'results/yaml_test_bin.data' WITH (FORMAT binary)
+TRUNCATE yaml_test_bin;
+\copy yaml_test_bin FROM 'results/yaml_test_bin.data' WITH (FORMAT binary)
+
+-- Byte-exact survival of the original text and jsonb-backed semantics
+SELECT id, data FROM yaml_test_bin ORDER BY id;
+SELECT id, yaml_to_jsonb(data) FROM yaml_test_bin ORDER BY id;
+
+DROP TABLE yaml_test_bin;
+
 -- Containment, existence, and jsonpath operators
 SELECT 'a: 1
 b: 2'::yaml @> 'a: 1'::yaml;
@@ -265,8 +295,141 @@ SELECT count(*) FROM yaml_gin_test WHERE data ?| ARRAY['k','missing'];
 SELECT count(*) FROM yaml_gin_test WHERE data ?& ARRAY['k','v'];
 SELECT id FROM yaml_gin_test WHERE data @? '$.k ? (@ == "target")';
 SELECT id FROM yaml_gin_test WHERE data @@ '$.k == "target"';
+
+-- A single @> containment against a multi-key document extracts more than
+-- one GIN key from one operand, so the bitmap scan must AND several
+-- "maybe" results together within one gin_(tri)consistent_yaml(_path) call
+-- -- this only happens with 2+ keys/conditions (a single-key scan never
+-- reaches triconsistent, only consistent). Two further ANDed @> clauses
+-- on the same column add a second, independent path to the same code
+-- (BitmapAnd-eligible query over one GIN index).
+--
+-- yaml_gin_path (yaml_path_ops) also supports @>/@?, and is always
+-- cheaper than yaml_gin_default (yaml_ops) for these operators, so the
+-- planner picks it even when both indexes exist. To pin each opclass's
+-- triconsistent function down individually, drop the other index before
+-- each block rather than relying on cost-based selection.
+--
+-- This isolation matters for more than plan-shape correctness: verified
+-- (by temporarily forcing gin_triconsistent_yaml to return GIN_MAYBE
+-- unconditionally) that the yaml_ops block below is a real correctness
+-- gate -- the neutered function produced both wrong row counts and a
+-- reproducible backend crash, because skipping the real jsonb
+-- triconsistent logic also skips setting the required *recheck output
+-- argument. The yaml_path_ops block's queries, by contrast, still
+-- returned correct final rows under the same neuter (bitmap heap
+-- recheck re-applies the real @? operator regardless of what
+-- triconsistent reported), so that half only proves triconsistent is
+-- reached/plan-shape-correct, not that its internal logic is right.
+SET enable_bitmapscan = on;
+
+-- yaml_ops / gin_triconsistent_yaml: drop the path index so the default
+-- opclass is the only one available for these @> queries.
+DROP INDEX yaml_gin_path;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM yaml_gin_test WHERE data @> 'k: target
+v: found'::yaml;
+SELECT id FROM yaml_gin_test WHERE data @> 'k: target
+v: found'::yaml;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM yaml_gin_test
+  WHERE data @> 'k: target'::yaml AND data @> 'v: found'::yaml;
+SELECT id FROM yaml_gin_test
+  WHERE data @> 'k: target'::yaml AND data @> 'v: found'::yaml;
+
+-- A pair of conditions that cannot both be satisfied by the same row
+-- (still requires triconsistent to combine "maybe" bitmaps correctly,
+-- this time yielding a definite "no" rather than a definite "yes")
+SELECT count(*) FROM yaml_gin_test
+  WHERE data @> 'k: target'::yaml AND data @> 'k: 7'::yaml;
+
+CREATE INDEX yaml_gin_path ON yaml_gin_test USING gin (data yaml_path_ops);
+
+-- yaml_path_ops / gin_triconsistent_yaml_path: drop the default index so
+-- the path opclass is the only one available for these @? queries.
+-- (Coverage-only for this opclass -- see note above: bitmap heap
+-- recheck re-validates the real @? operator regardless of what
+-- triconsistent returns here, so this proves the function is reached
+-- with the right plan shape, not that its logic is correct.)
+DROP INDEX yaml_gin_default;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM yaml_gin_test
+  WHERE data @? '$.k ? (@ == "target")' AND data @? '$.v ? (@ == "found")';
+SELECT id FROM yaml_gin_test
+  WHERE data @? '$.k ? (@ == "target")' AND data @? '$.v ? (@ == "found")';
+
+SELECT count(*) FROM yaml_gin_test
+  WHERE data @? '$.k ? (@ == "target")' AND data @? '$.k ? (@ == "7")';
+
 RESET enable_seqscan;
+RESET enable_bitmapscan;
 DROP TABLE yaml_gin_test;
+
+-- TOAST: force out-of-line storage of the custom varlena layout
+-- ([varlena hdr][orig_len][jsonb subvarlena][orig bytes]) and confirm
+-- YAML_JSONB_PTR/YAML_ORIG_PTR still locate their slices correctly once
+-- the value has been compressed/detoasted rather than read inline.
+-- md5() output is high-entropy hex, so chaining 100 of them (3200 bytes,
+-- single unbroken token so libyaml can't fold/wrap it) comfortably
+-- exceeds TOAST_TUPLE_THRESHOLD even after pglz compression.
+CREATE TABLE yaml_toast_test (id serial, data yaml, plain_len int);
+CREATE TABLE yaml_toast_plain (id serial, data yaml);
+ALTER TABLE yaml_toast_test ALTER COLUMN data SET STORAGE EXTENDED;
+ALTER TABLE yaml_toast_plain ALTER COLUMN data SET STORAGE PLAIN;
+
+INSERT INTO yaml_toast_test (id, data, plain_len)
+SELECT 1, format('big: %s', string_agg(md5(g::text), ''))::yaml,
+       length(format('big: %s', string_agg(md5(g::text), '')))
+FROM generate_series(1, 100) g;
+
+-- STORAGE PLAIN forbids compression and out-of-line storage, so this row
+-- with identical content is a same-shape control: its pg_column_size is
+-- the true uncompressed on-disk size of the [hdr][orig_len][jsonb][orig]
+-- layout.  The EXTENDED row above must come out smaller, proving the
+-- value was actually compressed/toasted rather than stored inline as-is
+-- (TOAST_TUPLE_THRESHOLD is 2KB; this ~6.5KB combined payload -- 3.2KB
+-- jsonb copy plus 3.2KB orig text -- is comfortably over it).
+INSERT INTO yaml_toast_plain (id, data)
+SELECT 1, format('big: %s', string_agg(md5(g::text), ''))::yaml
+FROM generate_series(1, 100) g;
+
+SELECT (SELECT pg_column_size(data) FROM yaml_toast_test WHERE id = 1) <
+       (SELECT pg_column_size(data) FROM yaml_toast_plain WHERE id = 1)
+       AS was_toasted;
+
+DROP TABLE yaml_toast_plain;
+
+-- Equality on a detoasted large value (delegates to compareJsonbContainers
+-- over the embedded jsonb slice -- exercises YAML_JSONB_PTR post-detoast)
+SELECT data = data FROM yaml_toast_test WHERE id = 1;
+SELECT data <> jsonb_to_yaml('{"big": "different"}'::jsonb) FROM yaml_toast_test WHERE id = 1;
+
+-- Path access into the large scalar returns it byte-for-byte: check the
+-- fixed-content prefix explicitly, then confirm the full length matches
+-- (together these pin down the whole 3200-char value without embedding
+-- it as a literal).
+SELECT left(yaml_get(data, 'big'), 64) = md5(1::text) || md5(2::text)
+FROM yaml_toast_test WHERE id = 1;
+SELECT length(yaml_get(data, 'big')) = plain_len - length('big: ')
+FROM yaml_toast_test WHERE id = 1;
+
+-- Cast to jsonb operates on the jsonb slice embedded past the orig_len
+-- header -- if YAML_JSONB_PTR/YAML_ORIG_PTR miscomputed the offset after
+-- detoasting, this would return garbage, a truncated value, or crash.
+SELECT yaml_to_jsonb(data) -> 'big' = to_jsonb(yaml_get(data, 'big'))
+FROM yaml_toast_test WHERE id = 1;
+SELECT yaml_typeof(data, 'big') FROM yaml_toast_test WHERE id = 1;
+
+-- Round-trip through yaml_out (orig bytes, past the jsonb slice) still
+-- matches the original text exactly
+SELECT (data::text) = format('big: %s', string_agg(md5(g::text), ''))
+FROM yaml_toast_test, generate_series(1, 100) g WHERE id = 1
+GROUP BY data;
+
+DROP TABLE yaml_toast_test;
 
 -- Test cast to text
 SELECT 'name: test'::yaml::text;
