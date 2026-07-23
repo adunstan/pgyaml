@@ -1,5 +1,7 @@
 # pgyaml
 
+[![CI](https://github.com/adunstan/pgyaml/actions/workflows/ci.yml/badge.svg)](https://github.com/adunstan/pgyaml/actions/workflows/ci.yml)
+
 A PostgreSQL extension providing a `yaml` data type backed by parsed
 jsonb. YAML input is parsed once with libyaml and stored alongside the
 original text; comparison, hashing, path lookup, containment,

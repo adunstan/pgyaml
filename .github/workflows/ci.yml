@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Released, still-supported branches, via the PostgreSQL Apt repo.
+  released:
+    name: PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    container: pgxn/pgxn-tools
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - name: Start PostgreSQL ${{ matrix.pg }} (+ libyaml)
+        run: pg-start ${{ matrix.pg }} libyaml-dev
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Build and run installcheck
+        run: pg-build-test
+
+  # The development branch: not an apt package, so build the server from
+  # source.  This is the configuration the extension is primarily written
+  # against, so a failure here means the master-only code paths regressed.
+  master:
+    name: PostgreSQL master
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bison flex \
+            libreadline-dev zlib1g-dev libyaml-dev pkg-config
+      - name: Build and install PostgreSQL master
+        run: |
+          git clone --depth 1 https://git.postgresql.org/git/postgresql.git pgsrc
+          cd pgsrc
+          ./configure --prefix="$HOME/pgmaster" --without-icu --enable-cassert
+          make -s -j"$(nproc)" install
+      - name: Check out extension
+        uses: actions/checkout@v4
+        with:
+          path: ext
+      - name: Build, install, and installcheck
+        run: |
+          export PATH="$HOME/pgmaster/bin:$PATH"
+          cd ext
+          make PG_CONFIG="$HOME/pgmaster/bin/pg_config"
+          make PG_CONFIG="$HOME/pgmaster/bin/pg_config" install
+          initdb -D "$HOME/pgdata" --no-locale --encoding=UTF8
+          pg_ctl -D "$HOME/pgdata" -l "$HOME/pg.log" \
+            -o "-k /tmp -p 5455 -c listen_addresses=''" start
+          PGHOST=/tmp PGPORT=5455 \
+            make PG_CONFIG="$HOME/pgmaster/bin/pg_config" installcheck \
+            || { cat regression.diffs; exit 1; }
