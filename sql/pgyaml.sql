@@ -655,6 +655,19 @@ RESET enable_bitmapscan;
 RESET enable_indexscan;
 DROP TABLE yaml_oprestore;
 
+-- Encoding: libyaml is UTF-8 only, so the type transcodes to/from the
+-- server encoding around it.  That is a no-op in this UTF-8 regression
+-- database but exercises the same code paths (set_jbv_utf8_string on parse,
+-- pg_server_to_any on emit).  A non-ASCII value must round-trip through both
+-- the jsonb and the text (yaml_out) paths.  chr(92) is a backslash, so the
+-- test source stays pure ASCII.
+SELECT yaml_to_jsonb(('greeting: "' || chr(92) || 'u00e9"')::yaml)
+       = (('greeting: "' || chr(92) || 'u00e9"')::yaml::text::yaml)::jsonb
+       AS unicode_text_roundtrip;
+SELECT yaml_to_jsonb(jsonb_to_yaml(('{"g": "' || chr(92) || 'u00e9"}')::jsonb))
+       = ('{"g": "' || chr(92) || 'u00e9"}')::jsonb
+       AS unicode_jsonb_roundtrip;
+
 -- Cleanup
 DROP TABLE yaml_test;
 DROP EXTENSION pgyaml;

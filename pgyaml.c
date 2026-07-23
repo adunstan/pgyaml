@@ -27,6 +27,7 @@
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/fmgrprotos.h"
+#include "mb/pg_wchar.h"
 #include "utils/json.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
@@ -187,6 +188,28 @@ looks_like_number(const char *str)
 }
 
 /*
+ * Store a UTF-8 string (as produced by libyaml) into a JsonbValue as a
+ * jbvString, converting it to the server encoding first.  jsonb strings are
+ * always in the server encoding; libyaml works only in UTF-8, so we parse a
+ * UTF-8 copy of the input and convert each resulting string back here.  On a
+ * UTF-8 database pg_any_to_server is a no-op; on any other encoding it
+ * converts, raising jsonb's own "could not be translated to the server's
+ * encoding" error for a code point with no representation there (matching
+ * the core json/jsonb behavior).  The converted buffer lives in the current
+ * memory context, which outlives JsonbValueToJsonb, so the pointer stays
+ * valid until the jsonb is serialized.
+ */
+static void
+set_jbv_utf8_string(JsonbValue *jbv, const char *utf8, int len)
+{
+	char	   *s = pg_any_to_server(utf8, len, PG_UTF8);
+
+	jbv->type = jbvString;
+	jbv->val.string.val = s;
+	jbv->val.string.len = (s == utf8) ? len : (int) strlen(s);
+}
+
+/*
  * Translate a YAML scalar node to a JsonbValue.  Quoted scalars always
  * become strings; plain scalars resolve to null/bool/number/string per
  * YAML 1.1-ish rules so that type semantics survive the round trip.
@@ -203,9 +226,7 @@ yaml_scalar_to_jbvalue(yaml_node_t *node, JsonbValue *jbv)
 		style == YAML_LITERAL_SCALAR_STYLE ||
 		style == YAML_FOLDED_SCALAR_STYLE)
 	{
-		jbv->type = jbvString;
-		jbv->val.string.val = val;
-		jbv->val.string.len = (int) len;
+		set_jbv_utf8_string(jbv, val, (int) len);
 		return true;
 	}
 
@@ -245,9 +266,7 @@ yaml_scalar_to_jbvalue(yaml_node_t *node, JsonbValue *jbv)
 		return true;
 	}
 
-	jbv->type = jbvString;
-	jbv->val.string.val = val;
-	jbv->val.string.len = (int) len;
+	set_jbv_utf8_string(jbv, val, (int) len);
 	return true;
 }
 
@@ -345,9 +364,9 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 				if (!yaml_charge_node_budget(nodecount, ok))
 					return;
 				/* jsonb object keys are always strings */
-				jbv.type = jbvString;
-				jbv.val.string.val = (char *) key_node->data.scalar.value;
-				jbv.val.string.len = (int) key_node->data.scalar.length;
+				set_jbv_utf8_string(&jbv,
+									(char *) key_node->data.scalar.value,
+									(int) key_node->data.scalar.length);
 				yaml_push(state, WJB_KEY, &jbv);
 				push_yaml_node(doc, val_node, state, WJB_VALUE, depth + 1,
 							   nodecount, ok);
@@ -380,11 +399,24 @@ yaml_text_to_jsonb(const char *input, int input_len)
 	int64		nodecount = 0;
 	volatile bool document_valid = false;
 	volatile bool extra_valid = false;
+	char	   *utf8;
+	int			utf8_len;
+
+	/*
+	 * libyaml parses UTF-8 only, but the server encoding may be anything.
+	 * Convert to UTF-8 up front (a no-op on a UTF-8 database) and hand that
+	 * to libyaml; the resulting strings are converted back to the server
+	 * encoding as each jsonb value is built (see set_jbv_utf8_string).  Done
+	 * before yaml_parser_initialize so a bad-input conversion error can't
+	 * leak the parser.
+	 */
+	utf8 = pg_server_to_any(input, input_len, PG_UTF8);
+	utf8_len = (utf8 == input) ? input_len : (int) strlen(utf8);
 
 	if (!yaml_parser_initialize(&parser))
 		return NULL;
-	yaml_parser_set_input_string(&parser, (const unsigned char *) input,
-								 (size_t) input_len);
+	yaml_parser_set_input_string(&parser, (const unsigned char *) utf8,
+								 (size_t) utf8_len);
 
 	if (!yaml_parser_load(&parser, &document))
 	{
@@ -682,13 +714,19 @@ emit_jsonb_scalar(yaml_emitter_t *emitter, JsonbValue *v)
 			quoted_ok = 0;
 			break;
 		case jbvString:
-			txt = v->val.string.val;
-			len = (size_t) v->val.string.len;
-			style = YAML_ANY_SCALAR_STYLE;
-			quoted_ok = 1;
-			/* Force quoting when a plain emission would change type. */
+			/* Force quoting when a plain emission would change type.  The
+			 * keyword/number tests are ASCII, so classify on the
+			 * server-encoding form before transcoding. */
 			plain_ok = plain_would_reparse_nonstring(v->val.string.val,
 													 v->val.string.len) ? 0 : 1;
+			/* libyaml emits UTF-8; convert the server-encoding string up
+			 * (a no-op on a UTF-8 database). */
+			txt = pg_server_to_any(v->val.string.val, v->val.string.len,
+								   PG_UTF8);
+			len = (txt == v->val.string.val)
+				? (size_t) v->val.string.len : strlen(txt);
+			style = YAML_ANY_SCALAR_STYLE;
+			quoted_ok = 1;
 			break;
 		default:
 			return false;
@@ -819,7 +857,19 @@ jsonb_to_yaml_value(Jsonb *jb)
 	while (out.len > 0 && out.data[out.len - 1] == '\n')
 		out.data[--out.len] = '\0';
 
-	result = build_yaml_value(out.data, out.len, jb);
+	/*
+	 * libyaml produced UTF-8; store the orig bytes in the server encoding so
+	 * yaml_out and the ::text cast return server-encoded text like every
+	 * other path (a no-op on a UTF-8 database).
+	 */
+	{
+		char	   *srv = pg_any_to_server(out.data, out.len, PG_UTF8);
+		int			srv_len = (srv == out.data) ? out.len : (int) strlen(srv);
+
+		result = build_yaml_value(srv, srv_len, jb);
+		if (srv != out.data)
+			pfree(srv);
+	}
 	pfree(out.data);
 	return result;
 }
