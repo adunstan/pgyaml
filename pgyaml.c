@@ -41,6 +41,44 @@
 PG_MODULE_MAGIC;
 
 /*
+ * pgyaml supports PostgreSQL 14 through the current development branch.
+ */
+#if PG_VERSION_NUM < 140000
+#error "pgyaml requires PostgreSQL 14 or later"
+#endif
+
+/*
+ * Building a jsonb value differs across server versions.  On PostgreSQL 19
+ * (development) JsonbInState became a public type in jsonb.h and
+ * pushJsonbValue() takes it directly, leaving the finished value in
+ * ->result.  On 14-18 the builder is driven through an opaque
+ * JsonbParseState **, and pushJsonbValue() returns the finished value.
+ * YamlInState + yaml_push() hide the difference: both spellings leave the
+ * completed value in state->result (NULL until the outermost container
+ * closes).
+ */
+#if PG_VERSION_NUM >= 190000
+typedef JsonbInState YamlInState;
+#else
+typedef struct YamlInState
+{
+	JsonbParseState *parseState;
+	JsonbValue *result;
+} YamlInState;
+#endif
+
+static inline JsonbValue *
+yaml_push(YamlInState *state, JsonbIteratorToken tok, JsonbValue *val)
+{
+#if PG_VERSION_NUM >= 190000
+	pushJsonbValue(state, tok, val);
+#else
+	state->result = pushJsonbValue(&state->parseState, tok, val);
+#endif
+	return state->result;
+}
+
+/*
  * Physical layout of a yaml Datum.  Always accessed through a fully
  * detoasted pointer.
  */
@@ -84,7 +122,7 @@ static bool looks_like_number(const char *str);
 static bool yaml_scalar_to_jbvalue(yaml_node_t *node, JsonbValue *jbv);
 static bool yaml_charge_node_budget(int64 *nodecount, bool *ok);
 static void push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
-						   JsonbInState *jin, JsonbIteratorToken scalar_tok,
+						   YamlInState *state, JsonbIteratorToken scalar_tok,
 						   int depth, int64 *nodecount, bool *ok);
 static Jsonb *yaml_text_to_jsonb(const char *input, int input_len);
 static YamlValue *build_yaml_value(const char *orig, int orig_len, Jsonb *jb);
@@ -231,13 +269,14 @@ yaml_charge_node_budget(int64 *nodecount, bool *ok)
 }
 
 /*
- * Walk a YAML node subtree, pushing its contents into the JsonbInState.
- * Scalar values are pushed with the caller-supplied token (WJB_ELEM,
- * WJB_VALUE, or WJB_KEY).  *ok is set to false on any structural error.
+ * Walk a YAML node subtree, pushing its contents into the jsonb build
+ * state.  Scalar values are pushed with the caller-supplied token
+ * (WJB_ELEM, WJB_VALUE, or WJB_KEY).  *ok is set to false on any
+ * structural error.
  */
 static void
 push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
-			   JsonbInState *jin, JsonbIteratorToken scalar_tok,
+			   YamlInState *state, JsonbIteratorToken scalar_tok,
 			   int depth, int64 *nodecount, bool *ok)
 {
 	JsonbValue	jbv;
@@ -267,11 +306,11 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 				*ok = false;
 				return;
 			}
-			pushJsonbValue(jin, scalar_tok, &jbv);
+			yaml_push(state, scalar_tok, &jbv);
 			return;
 
 		case YAML_SEQUENCE_NODE:
-			pushJsonbValue(jin, WJB_BEGIN_ARRAY, NULL);
+			yaml_push(state, WJB_BEGIN_ARRAY, NULL);
 			for (item = node->data.sequence.items.start;
 				 item < node->data.sequence.items.top && *ok;
 				 item++)
@@ -282,15 +321,15 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 					*ok = false;
 					return;
 				}
-				push_yaml_node(doc, sub, jin, WJB_ELEM, depth + 1,
+				push_yaml_node(doc, sub, state, WJB_ELEM, depth + 1,
 							   nodecount, ok);
 			}
 			if (*ok)
-				pushJsonbValue(jin, WJB_END_ARRAY, NULL);
+				yaml_push(state, WJB_END_ARRAY, NULL);
 			return;
 
 		case YAML_MAPPING_NODE:
-			pushJsonbValue(jin, WJB_BEGIN_OBJECT, NULL);
+			yaml_push(state, WJB_BEGIN_OBJECT, NULL);
 			for (pair = node->data.mapping.pairs.start;
 				 pair < node->data.mapping.pairs.top && *ok;
 				 pair++)
@@ -309,12 +348,12 @@ push_yaml_node(yaml_document_t *doc, yaml_node_t *node,
 				jbv.type = jbvString;
 				jbv.val.string.val = (char *) key_node->data.scalar.value;
 				jbv.val.string.len = (int) key_node->data.scalar.length;
-				pushJsonbValue(jin, WJB_KEY, &jbv);
-				push_yaml_node(doc, val_node, jin, WJB_VALUE, depth + 1,
+				yaml_push(state, WJB_KEY, &jbv);
+				push_yaml_node(doc, val_node, state, WJB_VALUE, depth + 1,
 							   nodecount, ok);
 			}
 			if (*ok)
-				pushJsonbValue(jin, WJB_END_OBJECT, NULL);
+				yaml_push(state, WJB_END_OBJECT, NULL);
 			return;
 
 		default:
@@ -334,7 +373,7 @@ yaml_text_to_jsonb(const char *input, int input_len)
 	yaml_document_t document;
 	yaml_document_t extra;
 	yaml_node_t *root;
-	JsonbInState jin = {0};
+	YamlInState state = {0};
 	JsonbValue	jbv;
 	Jsonb	   *jb = NULL;
 	bool		ok = true;
@@ -374,10 +413,10 @@ yaml_text_to_jsonb(const char *input, int input_len)
 			}
 			else
 			{
-				push_yaml_node(&document, root, &jin, WJB_ELEM, 0,
+				push_yaml_node(&document, root, &state, WJB_ELEM, 0,
 							   &nodecount, &ok);
-				if (ok && jin.result != NULL)
-					jb = JsonbValueToJsonb(jin.result);
+				if (ok && state.result != NULL)
+					jb = JsonbValueToJsonb(state.result);
 			}
 		}
 
@@ -978,7 +1017,11 @@ yaml_get_float(PG_FUNCTION_ARGS)
 	{
 		char	   *s = pnstrdup(v->val.string.val, v->val.string.len);
 
+#if PG_VERSION_NUM >= 160000
 		fval = float8in_internal(s, NULL, "float8", s, NULL);
+#else
+		fval = float8in_internal(s, NULL, "float8", s);
+#endif
 		pfree(s);
 	}
 	else

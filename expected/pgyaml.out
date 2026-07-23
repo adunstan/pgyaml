@@ -1066,16 +1066,17 @@ SELECT length('name: test'::yaml);
      10
 (1 row)
 
--- yaml -> json is assignment-only: implicit use in an expression fails
+-- yaml -> json is assignment-only: implicit use in an expression fails.
+-- Use terse verbosity: the DETAIL/HINT wording for an unresolved function
+-- differs across server versions (split into DETAIL+HINT on PG19), so keep
+-- only the version-stable primary message.
 \set ON_ERROR_STOP off
+\set VERBOSITY terse
 SELECT json_array_length('items:
   - a
   - b'::yaml);
-ERROR:  function json_array_length(yaml) does not exist
-LINE 1: SELECT json_array_length('items:
-               ^
-DETAIL:  No function of that name accepts the given argument types.
-HINT:  You might need to add explicit type casts.
+ERROR:  function json_array_length(yaml) does not exist at character 8
+\set VERBOSITY default
 \set ON_ERROR_STOP on
 -- But the explicit cast still works
 SELECT json_array_length(('items:

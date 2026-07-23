@@ -46,8 +46,11 @@ will ever read them, plain `jsonb` is usually the better fit —
 
 ## Installation
 
-Requires libyaml (with headers) and a PostgreSQL server built from
-source (for `pg_config` and the extension build infrastructure).
+Supports PostgreSQL 14 through the current development branch (master).
+
+Requires libyaml (with headers) and a PostgreSQL server with the
+extension build infrastructure (`pg_config` and the server development
+headers — the `-server-dev` / `-devel` package, or a source build).
 Install libyaml via your platform's usual mechanism.
 
 ```sh
