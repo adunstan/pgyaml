@@ -132,7 +132,7 @@ static int	yaml_emitter_write_handler(void *data, unsigned char *buffer,
 static bool emit_jsonb_scalar(yaml_emitter_t *emitter, JsonbValue *v);
 static text *jbvalue_to_text(JsonbValue *v);
 static JsonbValue *yaml_jsonb_path(Jsonb *jb, const char *path);
-static void yaml_arg_to_jsonb(FunctionCallInfo fcinfo, int argno);
+static Datum yaml_arg_to_jsonb(FunctionCallInfo fcinfo, int argno);
 
 /*---------------------------------------------------------------------
  * Scalar classification
@@ -1263,11 +1263,22 @@ yaml_to_text(PG_FUNCTION_ARGS)
  *
  * Each wrapper extracts the embedded jsonb from the yaml Datum, copies
  * it into its own palloc'd buffer (freeing any detoasted YamlValue
- * copy), installs the jsonb pointer into fcinfo->args, and invokes the
- * corresponding core jsonb function.
+ * copy), installs the jsonb pointer into fcinfo->args, invokes the
+ * corresponding core jsonb function, and then RESTORES the original
+ * Datum(s).
+ *
+ * Restoring is mandatory, not cosmetic.  The executor loads a *constant*
+ * argument into fcinfo->args once at expression-init time and never
+ * rewrites it per row; SRFs and GIN support functions likewise reuse one
+ * fcinfo across many calls.  If a swap were left in place, the next
+ * evaluation would re-run yaml_arg_to_jsonb over the jsonb we already
+ * installed, misread it as a YamlValue, and dereference a wild pointer
+ * (e.g. "WHERE ycol @> 'k: 1'::yaml" over a 2+ row scan crashed the
+ * backend).  yaml_arg_to_jsonb therefore returns the original Datum for
+ * the caller to put back.
  *---------------------------------------------------------------------*/
 
-static void
+static Datum
 yaml_arg_to_jsonb(FunctionCallInfo fcinfo, int argno)
 {
 	Datum		orig = fcinfo->args[argno].value;
@@ -1280,64 +1291,88 @@ yaml_arg_to_jsonb(FunctionCallInfo fcinfo, int argno)
 	if ((Pointer) y != DatumGetPointer(orig))
 		pfree(y);
 	fcinfo->args[argno].value = JsonbPGetDatum(copy);
+	return orig;
 }
 
 PG_FUNCTION_INFO_V1(yaml_contains);
 Datum
 yaml_contains(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	yaml_arg_to_jsonb(fcinfo, 1);
-	return jsonb_contains(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		a1 = yaml_arg_to_jsonb(fcinfo, 1);
+	Datum		result = jsonb_contains(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	fcinfo->args[1].value = a1;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(yaml_contained);
 Datum
 yaml_contained(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	yaml_arg_to_jsonb(fcinfo, 1);
-	return jsonb_contained(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		a1 = yaml_arg_to_jsonb(fcinfo, 1);
+	Datum		result = jsonb_contained(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	fcinfo->args[1].value = a1;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(yaml_exists);
 Datum
 yaml_exists(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return jsonb_exists(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_exists(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(yaml_exists_any);
 Datum
 yaml_exists_any(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return jsonb_exists_any(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_exists_any(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(yaml_exists_all);
 Datum
 yaml_exists_all(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return jsonb_exists_all(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_exists_all(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(yaml_path_exists_opr);
 Datum
 yaml_path_exists_opr(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return jsonb_path_exists_opr(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_path_exists_opr(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(yaml_path_match_opr);
 Datum
 yaml_path_match_opr(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return jsonb_path_match_opr(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_path_match_opr(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 /*---------------------------------------------------------------------
@@ -1352,8 +1387,11 @@ PG_FUNCTION_INFO_V1(gin_extract_yaml);
 Datum
 gin_extract_yaml(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return gin_extract_jsonb(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = gin_extract_jsonb(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gin_extract_yaml_query);
@@ -1361,10 +1399,14 @@ Datum
 gin_extract_yaml_query(PG_FUNCTION_ARGS)
 {
 	StrategyNumber strategy = PG_GETARG_UINT16(2);
+	Datum		a0 = fcinfo->args[0].value;
+	Datum		result;
 
 	if (strategy == JsonbContainsStrategyNumber)
 		yaml_arg_to_jsonb(fcinfo, 0);
-	return gin_extract_jsonb_query(fcinfo);
+	result = gin_extract_jsonb_query(fcinfo);
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gin_consistent_yaml);
@@ -1372,10 +1414,14 @@ Datum
 gin_consistent_yaml(PG_FUNCTION_ARGS)
 {
 	StrategyNumber strategy = PG_GETARG_UINT16(1);
+	Datum		a2 = fcinfo->args[2].value;
+	Datum		result;
 
 	if (strategy == JsonbContainsStrategyNumber)
 		yaml_arg_to_jsonb(fcinfo, 2);
-	return gin_consistent_jsonb(fcinfo);
+	result = gin_consistent_jsonb(fcinfo);
+	fcinfo->args[2].value = a2;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gin_triconsistent_yaml);
@@ -1383,18 +1429,25 @@ Datum
 gin_triconsistent_yaml(PG_FUNCTION_ARGS)
 {
 	StrategyNumber strategy = PG_GETARG_UINT16(1);
+	Datum		a2 = fcinfo->args[2].value;
+	Datum		result;
 
 	if (strategy == JsonbContainsStrategyNumber)
 		yaml_arg_to_jsonb(fcinfo, 2);
-	return gin_triconsistent_jsonb(fcinfo);
+	result = gin_triconsistent_jsonb(fcinfo);
+	fcinfo->args[2].value = a2;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gin_extract_yaml_path);
 Datum
 gin_extract_yaml_path(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return gin_extract_jsonb_path(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = gin_extract_jsonb_path(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gin_extract_yaml_query_path);
@@ -1402,10 +1455,14 @@ Datum
 gin_extract_yaml_query_path(PG_FUNCTION_ARGS)
 {
 	StrategyNumber strategy = PG_GETARG_UINT16(2);
+	Datum		a0 = fcinfo->args[0].value;
+	Datum		result;
 
 	if (strategy == JsonbContainsStrategyNumber)
 		yaml_arg_to_jsonb(fcinfo, 0);
-	return gin_extract_jsonb_query_path(fcinfo);
+	result = gin_extract_jsonb_query_path(fcinfo);
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gin_consistent_yaml_path);
@@ -1413,10 +1470,14 @@ Datum
 gin_consistent_yaml_path(PG_FUNCTION_ARGS)
 {
 	StrategyNumber strategy = PG_GETARG_UINT16(1);
+	Datum		a2 = fcinfo->args[2].value;
+	Datum		result;
 
 	if (strategy == JsonbContainsStrategyNumber)
 		yaml_arg_to_jsonb(fcinfo, 2);
-	return gin_consistent_jsonb_path(fcinfo);
+	result = gin_consistent_jsonb_path(fcinfo);
+	fcinfo->args[2].value = a2;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(gin_triconsistent_yaml_path);
@@ -1424,10 +1485,14 @@ Datum
 gin_triconsistent_yaml_path(PG_FUNCTION_ARGS)
 {
 	StrategyNumber strategy = PG_GETARG_UINT16(1);
+	Datum		a2 = fcinfo->args[2].value;
+	Datum		result;
 
 	if (strategy == JsonbContainsStrategyNumber)
 		yaml_arg_to_jsonb(fcinfo, 2);
-	return gin_triconsistent_jsonb_path(fcinfo);
+	result = gin_triconsistent_jsonb_path(fcinfo);
+	fcinfo->args[2].value = a2;
+	return result;
 }
 
 /*---------------------------------------------------------------------
@@ -1440,18 +1505,10 @@ PG_FUNCTION_INFO_V1(yaml_path_query);
 Datum
 yaml_path_query(PG_FUNCTION_ARGS)
 {
-	Datum		orig = fcinfo->args[0].value;
-	Datum		result;
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_path_query(fcinfo);
 
-	/*
-	 * Value-per-call SRFs reuse fcinfo across iterations, so we must
-	 * restore args[0] before returning — otherwise the next call's
-	 * yaml_arg_to_jsonb would try to treat our already-swapped jsonb
-	 * pointer as a YamlValue.
-	 */
-	yaml_arg_to_jsonb(fcinfo, 0);
-	result = jsonb_path_query(fcinfo);
-	fcinfo->args[0].value = orig;
+	fcinfo->args[0].value = a0;
 	return result;
 }
 
@@ -1459,14 +1516,20 @@ PG_FUNCTION_INFO_V1(yaml_path_query_array);
 Datum
 yaml_path_query_array(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return jsonb_path_query_array(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_path_query_array(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
 
 PG_FUNCTION_INFO_V1(yaml_path_query_first);
 Datum
 yaml_path_query_first(PG_FUNCTION_ARGS)
 {
-	yaml_arg_to_jsonb(fcinfo, 0);
-	return jsonb_path_query_first(fcinfo);
+	Datum		a0 = yaml_arg_to_jsonb(fcinfo, 0);
+	Datum		result = jsonb_path_query_first(fcinfo);
+
+	fcinfo->args[0].value = a0;
+	return result;
 }
