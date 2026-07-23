@@ -228,6 +228,23 @@ SELECT 'n: 42'::yaml = 'n: "42"'::yaml;  -- f
 Hex (`0x10`), octal (`0o17`), binary (`0b101`), `.inf`, and `.nan` are
 **not** recognized as numbers; they round-trip as strings.
 
+A plain scalar that parses as a number but whose magnitude overflows
+PostgreSQL's `numeric` (e.g. `1e1000000000`) is **rejected on input**,
+exactly as the equivalent `jsonb` (`'1e1000000000'::jsonb`) is — the value
+is stored as `numeric`, which has a bounded range. Plain `json`, which keeps
+numbers as text, would accept it; `yaml` follows `jsonb`.
+
+## Encoding
+
+The type works in any server encoding, like `json`/`jsonb`. libyaml parses
+UTF-8 only, so input is transcoded to UTF-8 for parsing and each resulting
+string is converted back to the server encoding for storage (and the reverse
+on `jsonb_to_yaml`). On a UTF-8 database this is a no-op. `\uXXXX` escapes in
+double-quoted scalars are decoded and converted to the server encoding; a
+code point with no representation there is rejected, exactly as in `jsonb`.
+The original bytes returned by `yaml_out` / `::text` are always in the server
+encoding.
+
 ## Limitations
 
 Deliberate non-goals:
