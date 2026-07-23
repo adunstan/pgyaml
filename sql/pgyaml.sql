@@ -486,11 +486,16 @@ SELECT 'value: 123'::text::yaml;
 -- yaml -> text is implicit (text functions accept yaml directly)
 SELECT length('name: test'::yaml);
 
--- yaml -> json is assignment-only: implicit use in an expression fails
+-- yaml -> json is assignment-only: implicit use in an expression fails.
+-- Use terse verbosity: the DETAIL/HINT wording for an unresolved function
+-- differs across server versions (split into DETAIL+HINT on PG19), so keep
+-- only the version-stable primary message.
 \set ON_ERROR_STOP off
+\set VERBOSITY terse
 SELECT json_array_length('items:
   - a
   - b'::yaml);
+\set VERBOSITY default
 \set ON_ERROR_STOP on
 
 -- But the explicit cast still works
