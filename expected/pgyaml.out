@@ -1327,6 +1327,69 @@ SELECT id, yaml_to_jsonb(y) FROM yaml_dump_test ORDER BY id;
 (1 row)
 
 DROP TABLE yaml_dump_test;
+-- Delegating operators must restore fcinfo->args after swapping in the
+-- embedded jsonb.  A constant yaml/jsonpath operand is loaded into fcinfo
+-- once and reused across rows, so an in-place swap left un-restored is
+-- re-read as a YamlValue on the next row -- a wild pointer that crashed
+-- the backend.  Exercise the delegating operators over a multi-row
+-- seqscan with a constant operand; the earlier single-row, direct-operator
+-- tests never reused the constant, so this went uncaught.
+CREATE TABLE yaml_oprestore (id int, d yaml);
+INSERT INTO yaml_oprestore VALUES
+    (1, 'a: {b: 1}'), (2, 'a: {b: 2}'), (3, 'b: 1'), (4, 'a: {b: 1, c: 9}');
+SET enable_seqscan = on;
+SET enable_bitmapscan = off;
+SET enable_indexscan = off;
+-- @> / <@ with a constant yaml RHS reused across rows (the crash repro)
+SELECT id FROM yaml_oprestore WHERE d @> 'a: {b: 1}'::yaml ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM yaml_oprestore WHERE d <@ 'a: {b: 1, c: 9}'::yaml ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+-- key existence and jsonpath with a constant RHS reused across rows
+SELECT id FROM yaml_oprestore WHERE d ? 'a' ORDER BY id;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+SELECT id FROM yaml_oprestore WHERE d @@ '$.a.b == 1' ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM yaml_oprestore WHERE d @? '$.a.b ? (@ == 1)' ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+-- a constant yaml as the FIRST argument, reused across rows
+SELECT count(*) FROM yaml_oprestore,
+    LATERAL yaml_path_query_first('x: [1, 2, 3]'::yaml, '$.x[1]') q;
+ count 
+-------
+     4
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+RESET enable_indexscan;
+DROP TABLE yaml_oprestore;
 -- Cleanup
 DROP TABLE yaml_test;
 DROP EXTENSION pgyaml;
