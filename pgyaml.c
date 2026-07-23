@@ -600,10 +600,43 @@ yaml_emitter_write_handler(void *data, unsigned char *buffer, size_t size)
 }
 
 /*
- * Emit a jsonb scalar value as a YAML scalar event.  Strings use
- * YAML_ANY_SCALAR_STYLE with both implicit flags set so libyaml picks
- * plain when unambiguous and double-quoted otherwise; non-strings
- * always emit plain so that their type resolves correctly on re-parse.
+ * Would this string, emitted as a plain (unquoted) YAML scalar, be
+ * resolved to a NON-string by yaml_scalar_to_jbvalue on the way back in?
+ * If so the emitter must quote it, otherwise a jsonb string like "yes" or
+ * "42" would silently reparse as a boolean or number -- e.g. across a
+ * dump/restore, which round-trips through the text I/O path.  This mirrors
+ * the plain-scalar rules in yaml_scalar_to_jbvalue exactly.
+ */
+static bool
+plain_would_reparse_nonstring(const char *val, int len)
+{
+	char	   *s;
+	bool		result;
+
+	if (len == 0)
+		return true;			/* empty plain scalar -> null on reparse */
+
+	s = pnstrdup(val, len);
+	result = (strcmp(s, "~") == 0 ||
+			  strcasecmp(s, "null") == 0 ||
+			  strcasecmp(s, "true") == 0 ||
+			  strcasecmp(s, "false") == 0 ||
+			  strcasecmp(s, "yes") == 0 ||
+			  strcasecmp(s, "no") == 0 ||
+			  strcasecmp(s, "on") == 0 ||
+			  strcasecmp(s, "off") == 0 ||
+			  looks_like_number(s));
+	pfree(s);
+	return result;
+}
+
+/*
+ * Emit a jsonb scalar value as a YAML scalar event.  A string that would
+ * be unambiguous as a plain scalar uses YAML_ANY_SCALAR_STYLE (libyaml
+ * picks plain or double-quoted); a string that would reparse as a
+ * non-string is forced to a quoted style so its string-ness survives the
+ * round trip.  Non-strings always emit plain so their type resolves
+ * correctly on re-parse.
  */
 static bool
 emit_jsonb_scalar(yaml_emitter_t *emitter, JsonbValue *v)
@@ -652,8 +685,10 @@ emit_jsonb_scalar(yaml_emitter_t *emitter, JsonbValue *v)
 			txt = v->val.string.val;
 			len = (size_t) v->val.string.len;
 			style = YAML_ANY_SCALAR_STYLE;
-			plain_ok = 1;
 			quoted_ok = 1;
+			/* Force quoting when a plain emission would change type. */
+			plain_ok = plain_would_reparse_nonstring(v->val.string.val,
+													 v->val.string.len) ? 0 : 1;
 			break;
 		default:
 			return false;

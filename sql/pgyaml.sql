@@ -597,6 +597,36 @@ SELECT yaml_is_valid(E'a: 1\n---\nb: 2');
 SELECT yaml_is_valid(E'a: 1\n---\n: : bad');
 SELECT yaml_is_valid('');
 
+-- Text I/O round-trip fidelity (the pg_dump/restore path).  jsonb_to_yaml
+-- must not emit a type-ambiguous string (yes/no/on/off/true/false/null/~,
+-- a bare number, or empty) as a plain scalar, or it would silently reparse
+-- as a bool/null/number when the value travels back through yaml_out ->
+-- yaml_in (which is exactly what COPY TEXT, and therefore pg_dump, does).
+-- These cases have no prior coverage -- their absence is what hid the bug.
+
+-- Ambiguous string values are quoted; unambiguous ones stay plain.
+SELECT jsonb_to_yaml('{"s_yes":"yes","s_num":"42","s_null":"null","plain":"hello"}'::jsonb);
+
+-- Invariant: a value's embedded jsonb equals the jsonb its own emitted
+-- text reparses to.  Must hold for every value, however constructed.
+SELECT bool_and(yaml_to_jsonb(y) = (y::text::yaml)::jsonb) AS all_consistent
+FROM (VALUES
+    (jsonb_to_yaml('{"a":"yes","b":"42","c":"null","d":"on","e":"~","f":""}'::jsonb)),
+    (jsonb_to_yaml('{"g":"no","h":"off","i":"true","j":"-1.5e3"}'::jsonb)),
+    (jsonb_to_yaml('{"arr":["yes","42",null,7,true],"nest":{"k":"on"}}'::jsonb))
+) v(y);
+
+-- End-to-end restore path: COPY TEXT out and back in preserves string-ness
+-- (before the fix these came back as bool/null/number).
+CREATE TABLE yaml_dump_test (id int, y yaml);
+INSERT INTO yaml_dump_test VALUES
+    (1, jsonb_to_yaml('{"flag":"yes","name":"null","port":"22","count":42,"ok":true}'::jsonb));
+\copy yaml_dump_test TO 'results/yaml_dump_test.data' WITH (FORMAT text)
+TRUNCATE yaml_dump_test;
+\copy yaml_dump_test FROM 'results/yaml_dump_test.data' WITH (FORMAT text)
+SELECT id, yaml_to_jsonb(y) FROM yaml_dump_test ORDER BY id;
+DROP TABLE yaml_dump_test;
+
 -- Cleanup
 DROP TABLE yaml_test;
 DROP EXTENSION pgyaml;
